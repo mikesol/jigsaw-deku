@@ -171,7 +171,9 @@ main = do
                         { is_driver: _
                         , active_pieces: _
                         , all_positions: _
-                        } <$> (driver $ x /\ y) <*> currently_selected <*> piece_positions <#> \{ is_driver, active_pieces, all_positions } ->
+                        } <$> (driver $ x /\ y)
+                          <*> currently_selected
+                          <*> piece_positions <#> \{ is_driver, active_pieces, all_positions } ->
                           guard is_driver $ asDiff animated <#> \p -> do
                             _ /\ new_vals <- runWriterT do
                               for_ active_pieces \(a /\ b) -> do
