@@ -49,6 +49,8 @@ import QualifiedDo.Alt as Alt
 type Piece = Tuple Int Int
 type Pieces = Array Piece
 
+foreign import ship :: String
+
 width :: Int
 width = 3840
 
@@ -111,7 +113,7 @@ main = do
                 )
             [ image
                 Alt.do
-                  D.Href !:= "ship-1366926_crop_4k.png"
+                  D.Href !:= ship
                   D.X !:= show (-x * piece_width)
                   D.Y !:= show (-y * piece_height)
                   D.Width !:= show width
