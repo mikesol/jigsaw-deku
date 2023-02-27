@@ -17,6 +17,7 @@ to generate this file without the comments in this block.
   , "control"
   , "deku"
   , "effect"
+  , "either"
   , "filterable"
   , "foldable-traversable"
   , "hyrule"
@@ -24,8 +25,10 @@ to generate this file without the comments in this block.
   , "ordered-collections"
   , "prelude"
   , "profunctor"
+  , "qualified-do"
   , "random"
   , "refs"
+  , "transformers"
   , "tuples"
   ]
 , packages = ./packages.dhall

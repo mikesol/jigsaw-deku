@@ -2,30 +2,21 @@ module Main where
 
 import Prelude
 
-import Control.Alt ((<|>))
+import Control.Monad.Writer (lift, runWriterT, tell)
 import Data.Array ((..))
-import Data.Compactable (compact)
+import Data.Array (intercalate) as Array
+import Data.Either (Either(..))
+import Data.Filterable (compact, filter)
 import Data.Foldable (for_, oneOfMap)
-import Data.Maybe (Maybe(Just, Nothing))
-import Data.Profunctor (lcmap)
+import Data.Map as Map
+import Data.Maybe (Maybe(..))
+import Data.Monoid (guard)
+import Data.Set as Set
 import Data.Traversable (for)
-import Data.Tuple (Tuple(..), fst, snd)
+import Data.Tuple (Tuple(..), snd)
 import Data.Tuple.Nested ((/\))
 import Deku.Attribute ((!:=), (<:=>))
-import Deku.Control (blank, (<#~>))
-import Deku.DOM.Elt.Defs (defs_)
-import Deku.DOM.Elt.Image (image)
-import Deku.DOM.Elt.Pattern (pattern)
-import Deku.DOM.Elt.Rect (rect)
-import Deku.DOM.Elt.Svg (svg)
-import Deku.Hooks (useDyn_, useMailboxed, useState)
-import Deku.Toplevel (runInBody)
-import Effect (Effect)
-import Effect.Random (randomInt)
-import FRP.Event (Event, makeEvent, subscribe)
-import FRP.Event.AnimationFrame (animationFrame)
-import FRP.Event.Class (fold, gate)
-import Data.Array (intercalate) as Array
+import Deku.Core (dyn)
 import Deku.DOM.Attr.Fill (Fill(Fill)) as D
 import Deku.DOM.Attr.Height (Height(Height)) as D
 import Deku.DOM.Attr.Href (Href(Href)) as D
@@ -38,14 +29,22 @@ import Deku.DOM.Attr.ViewBox (ViewBox(ViewBox)) as D
 import Deku.DOM.Attr.Width (Width(Width)) as D
 import Deku.DOM.Attr.X (X(X)) as D
 import Deku.DOM.Attr.Y (Y(Y)) as D
+import Deku.DOM.Elt.Defs (defs_)
+import Deku.DOM.Elt.Image (image)
+import Deku.DOM.Elt.Pattern (pattern)
+import Deku.DOM.Elt.Rect (rect)
+import Deku.DOM.Elt.Svg (svg)
 import Deku.Do as Deku
-import FRP.Event.Keyboard (down, up) as Keyboard
-import Data.Map.Internal (fromFoldable, lookup) as Map
-import Data.Maybe (fromMaybe) as Maybe
-import FRP.Event.Mouse (down, getMouse, withPosition) as Mouse
-import Effect.Ref (modify_, new, read, write) as Ref
-import Data.Set (empty, insert, singleton) as Set
-import Deku.Core (dyn)
+import Deku.Hooks (useDyn_, useMailboxed, useMemoized, useState)
+import Deku.Listeners (click_)
+import Deku.Toplevel (runInBody)
+import Effect (Effect)
+import Effect.Random (randomInt)
+import FRP.Event (Event, fold, keepLatest)
+import FRP.Event.AnimationFrame (animationFrame)
+import FRP.Event.Keyboard as Keyboard
+import FRP.Event.Mouse (getMouse, withPosition)
+import QualifiedDo.Alt as Alt
 
 type Piece = Tuple Int Int
 type Pieces = Array Piece
@@ -71,127 +70,118 @@ piece_height = height / pieces_high
 pieces :: Pieces
 pieces = Tuple <$> 0 .. (pieces_wide - 1) <*> 0 .. (pieces_high - 1)
 
+asDiff :: Event { x :: Int, y :: Int } -> Event { x :: Int, y :: Int }
+asDiff = map snd <<< compact <<< fold f Nothing
+  where
+  f (Just (p0 /\ _)) p1 = Just (p0 /\ { x: p1.x - p0.x, y: p1.y - p0.y })
+  f Nothing p1 = Just (p1 /\ { x: 0, y: 0 })
+
 main :: Effect Unit
 main = do
-  selected <- Ref.new Set.empty
-  mouse <- Mouse.getMouse
-  random_starts <- Map.fromFoldable <$> for pieces \(x /\ y) -> do
+  m <- getMouse
+  piece_positions' <- Map.fromFoldable <$> for pieces \(x /\ y) -> do
     x' <- randomInt 0 width <#> (_ - (x * piece_width))
     y' <- randomInt 0 height <#> (_ - (y * piece_height))
     pure $ (x /\ y) /\ (x' /\ y')
   runInBody Deku.do
-    send_piece_dragged /\ receive_piece_dragged <- useState true
-    send_selection /\ receive_selection <- useMailboxed
-    send_move /\ receive_move <- useMailboxed <<< lcmap \(sender /\ receiver) ->
-      sender /\ \address ->
-        receiver address <|>
-          (Map.lookup address random_starts # Maybe.fromMaybe (0 /\ 0) # pure)
-    let
-
-      mouse_position :: Event { x :: Int, y :: Int }
-      mouse_position = Mouse.withPosition mouse animationFrame <#> _.pos # compact
-
-      clicked_outside = gate (receive_piece_dragged <#> not)
-        (Mouse.down <#> const true)
-
-      drag = gate receive_piece_dragged $ mouse_position - mouse_position
-      has_been_dragging =
-        (receive_piece_dragged <#> const false)
-          <|> (drag <#> const true)
-
-      is_shift_down = Keyboard.down
-        <#> case _ of
-          "ShiftLeft" -> Just true
-          _ -> Nothing
-        # compact
-      is_shift_up = Keyboard.up
-        <#> case _ of
-          "ShiftLeft" -> Just false
-          _ -> Nothing
-        # compact
-
-      is_shift = pure false <|> is_shift_down <|> is_shift_up
-
-      receive_pos = receive_move <#> (fold add (0 /\ 0))
-      receive_x = receive_pos <#> map fst
-      receive_y = receive_pos <#> map snd
-
-      move_selected :: Event (Tuple Int Int)
-      move_selected = makeEvent \k -> do
-        void $ subscribe drag \{ x: dx, y: dy } -> do
-          let
-            move = dx /\ dy
-          to_move <- Ref.read selected
-          for_ to_move \address -> do
-            send_move { address, payload: move }
-          k move
-        pure $ pure unit
-
-      unselect_all = makeEvent \_ -> do
-        void $ subscribe clicked_outside \e ->
-          if e then do
-            to_unselect <- Ref.read selected
-            for_ to_unselect \address ->
-              send_selection { address, payload: false }
-            selected # Ref.write Set.empty
-          else pure unit
-        pure $ pure unit
-
-      sink event = event <#~> \_ -> blank
+    shift_pressed <- useMemoized Alt.do
+      pure false
+      filter (_ == "ShiftLeft") Keyboard.up $> false
+      filter (_ == "ShiftLeft") Keyboard.down $> true
+    animated <- useMemoized $ compact (_.pos <$> withPosition m animationFrame)
+    set_driver /\ driver <- useMailboxed
+    set_moved_piece /\ moved_piece <- useMailboxed
+    set_currently_selected /\ currently_selected <- useState Set.empty
+    set_piece_positions /\ piece_positions <- useState piece_positions'
     svg
-      (D.Width !:= show (width * 2) <|> D.Height !:= show (height * 2))
-      [ sink move_selected
-      , sink unselect_all
-      , defs_ $
+      Alt.do
+        D.Width !:= show (width * 2)
+        D.Height !:= show (height * 2)
+        click_ (set_currently_selected Set.empty)
+      [ defs_ $
           pieces <#> \(x /\ y) -> pattern
-            ( D.Id !:= "background-" <> show x <> "-" <> show y
-                <|> D.Width !:= "100%"
-                <|> D.Height !:= "100%"
-                <|> D.ViewBox !:=
-                  ( [ 0, 0, piece_width, piece_height ]
-                      <#> show
-                      # Array.intercalate " "
-                  )
-            )
-            [ image
-                ( D.Href !:= "ship-1366926_crop_4k.png"
-                    <|> D.X !:= show (-x * piece_width)
-                    <|> D.Y !:= show (-y * piece_height)
-                    <|> D.Width !:= show width
-                    <|> D.Height !:= show height
+            Alt.do
+              D.Id !:= "background-" <> show x <> "-" <> show y
+              D.Width !:= "100%"
+              D.Height !:= "100%"
+              D.ViewBox !:=
+                ( [ 0, 0, piece_width, piece_height ]
+                    <#> show
+                    # Array.intercalate " "
                 )
+            [ image
+                Alt.do
+                  D.Href !:= "ship-1366926_crop_4k.png"
+                  D.X !:= show (-x * piece_width)
+                  D.Y !:= show (-y * piece_height)
+                  D.Width !:= show width
+                  D.Height !:= show height
                 []
             ]
-      , dyn $ oneOfMap pure $ pieces <#> \(x /\ y) -> Deku.do
-          { sendTo } <- useDyn_
-          rect
-            ( D.X <:=> (receive_x (x /\ y) <#> (_ + (x * piece_width)) <#> show)
-                <|> D.Y <:=> (receive_y (x /\ y) <#> (_ + (y * piece_height)) <#> show)
-                <|> D.Width !:= (show $ piece_width)
-                <|> D.Height !:= (show $ piece_height)
-                <|> D.Fill !:= "url(#background-" <> show x <> "-" <> show y <> ")"
-                <|> D.Stroke <:=>
-                  ( receive_selection (x /\ y) <#> case _ of
-                      true -> "orange"
-                      false -> "none"
-                  )
-                <|> D.StrokeWidth !:= "5"
-                <|> D.OnMousedown !:= do
-                  sendTo (pieces_wide * pieces_high)
-                  send_selection { address: x /\ y, payload: true }
-                  selected # Ref.modify_ (Set.insert (x /\ y))
-                  send_piece_dragged true
-                <|> D.OnMouseup <:=>
-                  ( (has_been_dragging || is_shift) <#> case _ of
-                      true -> send_piece_dragged false
-                      false -> do
-                        to_unselect <- Ref.read selected
-                        for_ to_unselect \address ->
-                          send_selection { address, payload: false }
-                        send_selection { address: x /\ y, payload: true }
-                        selected # Ref.write (Set.singleton (x /\ y))
-                        send_piece_dragged false
-                  )
-            )
-            []
+      , dyn
+          $
+            ( oneOfMap pure
+                (Map.toUnfoldable piece_positions' :: Array _)
+            ) <#> \((x /\ y) /\ (x' /\ y')) -> Deku.do
+              { sendTo } <- useDyn_
+              rect
+                Alt.do
+                  D.X <:=> Alt.do
+                    pure $ show x'
+                    keepLatest $ moved_piece (x /\ y) <#> case _ of
+                      Left (x'' /\ _) -> show <$> ((_.x <$> asDiff animated) + pure x'')
+                      Right (x'' /\ _) -> pure $ show x''
+                  D.Y <:=> Alt.do
+                    pure $ show y'
+                    keepLatest $ moved_piece (x /\ y) <#> case _ of
+                      Left (_ /\ y'') -> show <$> ((_.y <$> asDiff animated) + pure y'')
+                      Right (_ /\ y'') -> pure $ show y''
+                  D.Width !:= (show $ piece_width)
+                  D.Height !:= (show $ piece_height)
+                  D.Fill !:= "url(#background-" <> show x <> "-" <> show y <> ")"
+                  D.Stroke <:=>
+                    ( currently_selected <#>
+                        Set.member (x /\ y) >>> if _ then "orange" else "none"
+                    )
+                  D.StrokeWidth !:= "5"
+                  D.OnMousedown <:=>
+                    ( { is_shift_pressed: _
+                      , active_pieces: _
+                      , all_positions: _
+                      }
+                        <$> shift_pressed
+                        <*> currently_selected
+                        <*> piece_positions
+                        <#> \{ is_shift_pressed, active_pieces, all_positions } -> do
+                          set_driver { address: x /\ y, payload: true }
+                          sendTo (pieces_wide * pieces_high)
+                          let
+                            selection =
+                              if Set.member (x /\ y) active_pieces then active_pieces
+                              else Set.singleton (x /\ y)
+                                # if is_shift_pressed then Set.union active_pieces else identity
+                          set_currently_selected selection
+                          for_ selection \(a /\ b) -> do
+                            let old_pos = Map.lookup (a /\ b) all_positions
+                            for_ old_pos \(x'' /\ y'') -> do
+                              set_moved_piece { address: a /\ b, payload: Left (x'' /\ y'') }
+                    )
+                  D.OnMouseup <:=>
+                    ( keepLatest $
+                        { is_driver: _
+                        , active_pieces: _
+                        , all_positions: _
+                        } <$> (driver $ x /\ y) <*> currently_selected <*> piece_positions <#> \{ is_driver, active_pieces, all_positions } ->
+                          guard is_driver $ asDiff animated <#> \p -> do
+                            _ /\ new_vals <- runWriterT do
+                              for_ active_pieces \(a /\ b) -> do
+                                let old_pos = Map.lookup (a /\ b) all_positions
+                                for_ old_pos \(x'' /\ y'') -> do
+                                  let new_pos = (x'' + p.x) /\ (y'' + p.y)
+                                  lift $ set_moved_piece { address: a /\ b, payload: Right new_pos }
+                                  tell $ [ (a /\ b) /\ new_pos ]
+                            set_piece_positions $ Map.union (Map.fromFoldable new_vals) all_positions
+                            set_driver { address: x /\ y, payload: false }
+                    )
+                []
       ]
